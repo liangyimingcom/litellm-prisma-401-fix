@@ -1,0 +1,64 @@
+# LiteLLM Proxy - 生产配置（含 Prisma 崩溃缓解方案）
+# 
+# 此配置解决 Prisma engine_process_death 导致的虚假 HTTP 401 错误。
+# 详见 README.md。
+#
+# 优先级说明：
+#   P0 = 立即应用（低风险，高收益）
+#   P1 = P0 验证后应用（中等风险）
+#   P2 = 评估后再应用（高风险）
+
+model_list:
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-6
+      aws_region_name: us-east-1
+
+  # 在此添加其他模型...
+
+litellm_settings:
+  drop_params: true
+  cache: true
+  cache_params:
+    type: redis
+  # [P1] 从默认 6000s 降低到 10 分钟
+  # request_timeout: 600
+  # [P1] 关闭 verbose debug 日志
+  # set_verbose: False
+  # [P1] 使用 JSON 结构化日志，便于 CloudWatch Logs Insights 查询
+  # json_logs: true
+
+router_settings:
+  # [P2] 考虑切换到 simple-shuffle 以获得更好性能
+  # （仅在有多个相同模型的 deployment 时有意义）
+  routing_strategy: usage-based-routing-v2
+  enable_pre_call_check: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+  # ═══════════════════════════════════════════════════════════════
+  # P0 修复：缓解 Prisma engine_process_death → 401 错误
+  # ═══════════════════════════════════════════════════════════════
+  
+  # 当 Prisma/DB 不可用时，允许请求绕过 DB 检查继续处理。
+  # 请求仍正常发送到 Bedrock/OpenAI。
+  # 权衡：DB 不可用期间 spend tracking 暂时跳过。
+  allow_requests_on_db_unavailable: True
+
+  # 每 60 秒批量写入 spend 数据（而非每个请求实时写入）。
+  # 将 Prisma 交互频率降低约 60 倍。
+  # 权衡：UI 上的 spend 数据最多延迟 60s。
+  proxy_batch_write_at: 60
+
+  # ═══════════════════════════════════════════════════════════════
+  # P1：进一步减少 DB 压力（P0 验证后再取消注释）
+  # ═══════════════════════════════════════════════════════════════
+  
+  # 停止将错误日志写入 DB（错误仍通过 S3/callbacks 记录）
+  # disable_error_logs: True
+  
+  # 显式声明连接池上限（默认已是 10）
+  # 总连接数 = limit × workers × instances
+  # database_connection_pool_limit: 10

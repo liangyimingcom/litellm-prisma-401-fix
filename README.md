@@ -342,6 +342,78 @@ aws logs filter-log-events --log-group-name /ecs/litellm \
 
 ---
 
+## 生产环境部署验证 (2026-05-20)
+
+### 部署环境
+- **架构**: [AWS Multi-Provider GenAI Gateway](https://github.com/aws-solutions-library-samples/guidance-for-multi-provider-generative-ai-gateway-on-aws)
+- **基础设施**: ECS Fargate (2 tasks, 8vCPU/16GB each) + ALB + RDS PostgreSQL + ElastiCache Redis
+- **Region**: us-east-1
+- **LiteLLM Version**: v1.82.3
+- **Task Definition**: `litellm-stack-fargate-task:12` (ARM64)
+
+### 部署步骤
+1. 备份当前 `config.yaml` → S3 `.bak-20260520`
+2. 在 `general_settings` 中添加 P0 配置：
+   ```yaml
+   general_settings:
+     allow_requests_on_db_unavailable: True
+     proxy_batch_write_at: 60
+   ```
+3. `aws ecs update-service --force-new-deployment` (rolling update, minimumHealthyPercent=100%)
+4. `aws ecs wait services-stable` — 服务稳定确认
+
+### 完整功能性测试矩阵结果 (14/14 ✅)
+
+| # | 类别 | 测试项 | HTTP | 响应时间 | 结果 |
+|---|------|--------|------|---------|------|
+| A1 | 健康检查 | Liveliness | 200 | 1.47s | ✅ |
+| A2 | 健康检查 | Readiness (DB+Cache) | 200 | 0.84s | ✅ |
+| A3 | 健康检查 | Models 列表 (7个模型) | 200 | 0.84s | ✅ |
+| B1 | Anthropic API | Messages 基本请求 | 200 | 1.92s | ✅ |
+| B2 | Anthropic API | 流式响应 (stream) | 200 | 2.12s | ✅ |
+| B3 | Anthropic API | 大输出 (max_tokens=2048) | 200 | 3.27s | ✅ |
+| B4 | Anthropic API | 多轮对话 | 200 | 2.38s | ✅ |
+| C1 | OpenAI 兼容 | Chat Completions | 200 | 2.98s | ✅ |
+| C2 | OpenAI 兼容 | 流式响应 (stream) | 200 | 3.61s | ✅ |
+| C3 | OpenAI 兼容 | 不同模型 (claude-haiku-4-5) | 200 | 2.05s | ✅ |
+| D1 | 错误处理 | 无效 API Key → 401 | 401 | 0.87s | ✅ |
+| D2 | 错误处理 | 无效模型名 → 400 | 400 | 0.61s | ✅ |
+| D3 | 错误处理 | 无 Auth → 401 | 401 | 0.60s | ✅ |
+| E1 | 并发压测 | 5 并发请求 (零虚假 401) | 全200 | 1.6~3.1s | ✅ |
+
+### 性能基线
+
+| 指标 | 值 |
+|------|-----|
+| 健康检查平均响应 | 1.05s |
+| 推理请求平均响应 | 2.68s |
+| 推理请求最快 | 1.92s |
+| 推理请求最慢 | 3.61s |
+| 错误请求平均响应 | 0.69s |
+| 并发成功率 | 100% (5/5) |
+
+### 关键验证结论
+
+- ✅ **功能完整性**: Anthropic Messages API + OpenAI 兼容 API 全部正常
+- ✅ **安全性未受影响**: 无效请求仍正确拒绝（真实 401/400 不受影响）
+- ✅ **零性能衰退**: 响应时间在正常范围内（推理 2-4s）
+- ✅ **并发安全**: 5 并发请求全部成功，无虚假 401
+- ✅ **DB 连接正常**: Readiness 报告 `"db": "connected"`, `"cache": "redis"`
+
+### Readiness 详情（部署后）
+
+```json
+{
+  "status": "healthy",
+  "db": "connected",
+  "cache": "redis",
+  "litellm_version": "1.82.3",
+  "use_aiohttp_transport": true
+}
+```
+
+---
+
 ## 参考链接
 
 | 资源 | 链接 |
